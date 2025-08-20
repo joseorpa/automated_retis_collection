@@ -316,12 +316,54 @@ def stop_retis_on_node(node_name, dry_run=False):
         print(f"✗ Error stopping RETIS on {node_name}: {e}")
         return False
 
-def run_retis_on_node(node_name, retis_image, working_directory, dry_run=False):
+def run_retis_on_node(node_name, retis_image, working_directory, retis_args=None, dry_run=False):
     """Run the oc debug command with RETIS collection on a specific node."""
+    
+    # Set default retis_args if not provided (for backwards compatibility)
+    if retis_args is None:
+        retis_args = {
+            'output_file': 'events.json',
+            'allow_system_changes': True,
+            'ovs_track': True,
+            'stack': True,
+            'probe_stack': True,
+            'filter_packet': 'tcp port 8080 or tcp port 8081',
+            'retis_extra_args': ''
+        }
+    
+    # Build the retis collect command arguments
+    retis_cmd_args = ['collect']
+    
+    # Add output file
+    retis_cmd_args.extend(['-o', retis_args['output_file']])
+    
+    # Add boolean flags
+    if retis_args['allow_system_changes']:
+        retis_cmd_args.append('--allow-system-changes')
+    
+    if retis_args['ovs_track']:
+        retis_cmd_args.append('--ovs-track')
+    
+    if retis_args['stack']:
+        retis_cmd_args.append('--stack')
+    
+    if retis_args['probe_stack']:
+        retis_cmd_args.append('--probe-stack')
+    
+    # Add packet filter
+    if retis_args['filter_packet']:
+        retis_cmd_args.extend(['--filter-packet', f"'{retis_args['filter_packet']}'"])
+    
+    # Add any extra arguments
+    if retis_args['retis_extra_args']:
+        retis_cmd_args.extend(retis_args['retis_extra_args'].split())
+    
+    # Join all arguments
+    retis_cmd_str = ' '.join(retis_cmd_args)
     
     # Construct the shell command that will be executed after 'sh -c'
     # Use full path to the script since we downloaded it to the working directory
-    shell_command = f"export RETIS_IMAGE='{retis_image}'; {working_directory}/retis_in_container.sh collect -o events.json --allow-system-changes --ovs-track --stack --probe-stack --filter-packet 'tcp port 8080 or tcp port 8081'"
+    shell_command = f"export RETIS_IMAGE='{retis_image}'; {working_directory}/retis_in_container.sh {retis_cmd_str}"
     
     # Construct the command as a string for shell=True execution (like manual command)
     command_str = f'oc debug node/{node_name} -- chroot /host systemd-run --unit="RETIS" --working-directory={working_directory} sh -c "{shell_command}"'
@@ -329,6 +371,7 @@ def run_retis_on_node(node_name, retis_image, working_directory, dry_run=False):
     print(f"\nRunning RETIS collection on node: {node_name}")
     print(f"Working directory: {working_directory}")
     print(f"RETIS Image: {retis_image}")
+    print(f"RETIS Arguments: {retis_cmd_str}")
     print(f"DEBUG: Shell command: {shell_command}")
     print(f"DEBUG: Full command: {command_str}")
     
@@ -423,13 +466,25 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Basic usage
   python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker.*"
   python3 arc.py --kubeconfig /path/to/kubeconfig --workload-filter "ovn"
   python3 arc.py --kubeconfig ~/.kube/config --node-filter "compute" --workload-filter "pod.*networking"
+  
+  # Custom RETIS parameters
+  python3 arc.py --kubeconfig ~/.kube/config --output-file trace.json --filter-packet "tcp port 443"
+  python3 arc.py --kubeconfig ~/.kube/config --no-ovs-track --no-stack --filter-packet "udp port 53"
+  python3 arc.py --kubeconfig ~/.kube/config --retis-extra-args "--max-events 10000"
+  
+  # Infrastructure options
   python3 arc.py --kubeconfig ~/.kube/config --retis-image "custom-registry/retis:latest"
   python3 arc.py --kubeconfig ~/.kube/config --working-directory /tmp --dry-run
+  
+  # Stop operations
   python3 arc.py --kubeconfig ~/.kube/config --stop --parallel
   python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker" --stop --dry-run
+  
+  # Interactive mode
   python3 arc.py  # Will prompt for kubeconfig path
         """
     )
@@ -476,8 +531,81 @@ Examples:
         help='Stop RETIS collection on filtered nodes',
         action='store_true'
     )
+    # RETIS collection configuration parameters
+    parser.add_argument(
+        '--output-file', '-o',
+        help='Output file name for RETIS collection (default: events.json)',
+        default='events.json',
+        type=str
+    )
+    parser.add_argument(
+        '--allow-system-changes',
+        help='Allow RETIS to make system changes (default: enabled)',
+        action='store_true',
+        default=True
+    )
+    parser.add_argument(
+        '--no-allow-system-changes',
+        help='Disable system changes for RETIS collection',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--ovs-track',
+        help='Enable OVS tracking (default: enabled)',
+        action='store_true',
+        default=True
+    )
+    parser.add_argument(
+        '--no-ovs-track',
+        help='Disable OVS tracking',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--stack',
+        help='Enable stack trace collection (default: enabled)',
+        action='store_true',
+        default=True
+    )
+    parser.add_argument(
+        '--no-stack',
+        help='Disable stack trace collection',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--probe-stack',
+        help='Enable probe stack collection (default: enabled)',
+        action='store_true',
+        default=True
+    )
+    parser.add_argument(
+        '--no-probe-stack',
+        help='Disable probe stack collection',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--filter-packet',
+        help='Packet filter expression (default: "tcp port 8080 or tcp port 8081")',
+        default='tcp port 8080 or tcp port 8081',
+        type=str
+    )
+    parser.add_argument(
+        '--retis-extra-args',
+        help='Additional arguments to pass to retis collect command',
+        default='',
+        type=str
+    )
     
     args = parser.parse_args()
+    
+    # Process boolean flag conflicts
+    if args.no_allow_system_changes:
+        args.allow_system_changes = False
+    if args.no_ovs_track:
+        args.ovs_track = False
+    if args.no_stack:
+        args.stack = False
+    if args.no_probe_stack:
+        args.probe_stack = False
     
     # Validate arguments
     if args.stop:
@@ -485,6 +613,25 @@ Examples:
             print("Warning: --retis-image is ignored when using --stop")
         if args.working_directory != '/var/tmp':
             print("Warning: --working-directory is ignored when using --stop")
+        # These retis-specific arguments are ignored during stop
+        ignored_args = []
+        if args.output_file != 'events.json':
+            ignored_args.append('--output-file')
+        if not args.allow_system_changes:
+            ignored_args.append('--no-allow-system-changes')
+        if not args.ovs_track:
+            ignored_args.append('--no-ovs-track')
+        if not args.stack:
+            ignored_args.append('--no-stack')
+        if not args.probe_stack:
+            ignored_args.append('--no-probe-stack')
+        if args.filter_packet != 'tcp port 8080 or tcp port 8081':
+            ignored_args.append('--filter-packet')
+        if args.retis_extra_args:
+            ignored_args.append('--retis-extra-args')
+        
+        if ignored_args:
+            print(f"Warning: RETIS collection arguments are ignored when using --stop: {', '.join(ignored_args)}")
     
     # Validate that at least one filter is provided if the user wants to be specific
     if not args.node_filter and not args.workload_filter:
@@ -650,6 +797,17 @@ Examples:
         
         print(f"\n--- Script setup complete: {setup_success_count}/{len(nodes) + len(setup_failed_nodes)} nodes successful ---")
         
+        # --- Prepare RETIS arguments ---
+        retis_args = {
+            'output_file': args.output_file,
+            'allow_system_changes': args.allow_system_changes,
+            'ovs_track': args.ovs_track,
+            'stack': args.stack,
+            'probe_stack': args.probe_stack,
+            'filter_packet': args.filter_packet,
+            'retis_extra_args': args.retis_extra_args
+        }
+        
         # --- Run RETIS collection on each node ---
         if args.parallel:
             print("\nRunning RETIS collection in parallel mode...")
@@ -657,7 +815,7 @@ Examples:
             import threading
             
             def run_with_progress(node):
-                return run_retis_on_node(node, args.retis_image, args.working_directory, args.dry_run)
+                return run_retis_on_node(node, args.retis_image, args.working_directory, retis_args, args.dry_run)
             
             success_count = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(nodes), 5)) as executor:
@@ -676,7 +834,7 @@ Examples:
             success_count = 0
             for i, node in enumerate(nodes, 1):
                 print(f"\n--- Processing node {i}/{len(nodes)} ---")
-                success = run_retis_on_node(node, args.retis_image, args.working_directory, args.dry_run)
+                success = run_retis_on_node(node, args.retis_image, args.working_directory, retis_args, args.dry_run)
                 if success:
                     success_count += 1
         

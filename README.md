@@ -30,7 +30,20 @@ This tool automates the deployment and execution of RETIS (Real-time Traffic Ins
    cd automated_retis_collection
    ```
 
-2. **Install dependencies:**
+2. **Create and activate a virtual environment (recommended):**
+   ```bash
+   # Create virtual environment
+   python3 -m venv venv
+   
+   # Activate virtual environment
+   # On Linux/macOS:
+   source venv/bin/activate
+   
+   # On Windows:
+   # venv\Scripts\activate
+   ```
+
+3. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
