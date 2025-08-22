@@ -9,6 +9,7 @@ import tempfile
 import time
 import json
 import re
+import fnmatch
 from kubernetes import client, config
 
 def get_kubeconfig_path(args):
@@ -62,7 +63,8 @@ def get_nodes_from_kubernetes(api_instance, name_filter=None, workload_filter=No
         # Apply name filtering if specified
         filtered_nodes = all_nodes
         if name_filter:
-            filtered_nodes = [node for node in filtered_nodes if re.search(name_filter, node, re.IGNORECASE)]
+            # Use fnmatch for glob-style pattern matching (supports * and ? wildcards)
+            filtered_nodes = [node for node in filtered_nodes if fnmatch.fnmatch(node.lower(), name_filter.lower())]
             print(f"✓ After name filter '{name_filter}': {len(filtered_nodes)} nodes")
         
         # Apply workload filtering if specified
@@ -149,7 +151,14 @@ def download_retis_script_locally(script_url="https://raw.githubusercontent.com/
         print(f"✗ Failed to download retis_in_container.sh: {e}")
         return None
 
-def setup_script_on_node(node_name, working_directory, local_script_path, dry_run=False):
+def build_oc_command(base_command, kubeconfig_path=None):
+    """Build an oc command with kubeconfig parameter if provided."""
+    if kubeconfig_path:
+        return f'oc --kubeconfig="{kubeconfig_path}" {base_command}'
+    else:
+        return f'oc {base_command}'
+
+def setup_script_on_node(node_name, working_directory, local_script_path, kubeconfig_path=None, dry_run=False):
     """Copy the retis_in_container.sh script to a specific node and set permissions if needed."""
     print(f"Checking retis_in_container.sh on node {node_name}...")
     
@@ -162,7 +171,7 @@ def setup_script_on_node(node_name, working_directory, local_script_path, dry_ru
     
     try:
         # First, check if the script already exists with correct permissions
-        check_cmd = f'oc debug node/{node_name} -- chroot /host ls -la {working_directory}/retis_in_container.sh'
+        check_cmd = build_oc_command(f'debug node/{node_name} -- chroot /host ls -la {working_directory}/retis_in_container.sh', kubeconfig_path)
         print(f"Checking existing script on {node_name}...")
         
         check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, timeout=30)
@@ -187,7 +196,7 @@ def setup_script_on_node(node_name, working_directory, local_script_path, dry_ru
             print(f"Script does not exist on {node_name}")
         
         # Create working directory if needed
-        mkdir_cmd = f'oc debug node/{node_name} -- chroot /host mkdir -p {working_directory}'
+        mkdir_cmd = build_oc_command(f'debug node/{node_name} -- chroot /host mkdir -p {working_directory}', kubeconfig_path)
         print(f"Ensuring directory exists on {node_name}...")
         
         mkdir_result = subprocess.run(mkdir_cmd, shell=True, capture_output=True, text=True, timeout=30)
@@ -200,7 +209,7 @@ def setup_script_on_node(node_name, working_directory, local_script_path, dry_ru
             print(f"Copying script to {node_name}...")
             
             # Start a debug pod and get its name for copying
-            debug_cmd = f'oc debug node/{node_name} --to-namespace=default -- sleep 300'
+            debug_cmd = build_oc_command(f'debug node/{node_name} --to-namespace=default -- sleep 300', kubeconfig_path)
             print(f"Starting debug pod on {node_name}...")
             
             # Run the debug command in background and capture the pod name
@@ -210,7 +219,7 @@ def setup_script_on_node(node_name, working_directory, local_script_path, dry_ru
             time.sleep(10)
             
             # Get the debug pod name
-            get_pod_cmd = f'oc get pods -n default --no-headers | grep {node_name.split(".")[0]} | grep debug | head -1 | awk \'{{print $1}}\''
+            get_pod_cmd = build_oc_command(f'get pods -n default --no-headers', kubeconfig_path) + f' | grep {node_name.split(".")[0]} | grep debug | head -1 | awk \'{{print $1}}\''
             pod_result = subprocess.run(get_pod_cmd, shell=True, capture_output=True, text=True, timeout=30)
             
             if pod_result.returncode != 0 or not pod_result.stdout.strip():
@@ -222,7 +231,7 @@ def setup_script_on_node(node_name, working_directory, local_script_path, dry_ru
             print(f"Using debug pod: {debug_pod_name}")
             
             # Copy the script to the node
-            copy_cmd = f'oc cp {local_script_path} default/{debug_pod_name}:/host{working_directory}/retis_in_container.sh'
+            copy_cmd = build_oc_command(f'cp {local_script_path} default/{debug_pod_name}:/host{working_directory}/retis_in_container.sh', kubeconfig_path)
             print(f"Copying script: {copy_cmd}")
             
             copy_result = subprocess.run(copy_cmd, shell=True, capture_output=True, text=True, timeout=60)
@@ -241,7 +250,7 @@ def setup_script_on_node(node_name, working_directory, local_script_path, dry_ru
         # Set executable permissions if script is not executable
         if not script_executable:
             print(f"Setting executable permissions on {node_name}...")
-            chmod_cmd = f'oc debug node/{node_name} -- chroot /host chmod a+x {working_directory}/retis_in_container.sh'
+            chmod_cmd = build_oc_command(f'debug node/{node_name} -- chroot /host chmod a+x {working_directory}/retis_in_container.sh', kubeconfig_path)
             
             chmod_result = subprocess.run(chmod_cmd, shell=True, capture_output=True, text=True, timeout=30)
             
@@ -254,7 +263,7 @@ def setup_script_on_node(node_name, working_directory, local_script_path, dry_ru
             print(f"✓ Executable permissions set on {node_name}")
         
         # Final verification
-        verify_cmd = f'oc debug node/{node_name} -- chroot /host ls -la {working_directory}/retis_in_container.sh'
+        verify_cmd = build_oc_command(f'debug node/{node_name} -- chroot /host ls -la {working_directory}/retis_in_container.sh', kubeconfig_path)
         verify_result = subprocess.run(verify_cmd, shell=True, capture_output=True, text=True, timeout=30)
         
         if verify_result.returncode == 0:
@@ -273,18 +282,19 @@ def setup_script_on_node(node_name, working_directory, local_script_path, dry_ru
         print(f"✗ Error setting up script on {node_name}: {e}")
         return False
 
-def stop_retis_on_node(node_name, dry_run=False):
+def stop_retis_on_node(node_name, kubeconfig_path=None, dry_run=False):
     """Stop the RETIS systemd unit on a specific node."""
     print(f"Stopping RETIS collection on node: {node_name}")
     
     if dry_run:
         print(f"[DRY RUN] Would execute command:")
-        print(f"  Stop RETIS: oc debug node/{node_name} -- chroot /host systemctl stop RETIS")
+        stop_cmd_preview = build_oc_command(f'debug node/{node_name} -- chroot /host systemctl stop RETIS', kubeconfig_path)
+        print(f"  Stop RETIS: {stop_cmd_preview}")
         return True
     
     try:
         # Stop the RETIS systemd unit
-        stop_command_str = f'oc debug node/{node_name} -- chroot /host systemctl stop RETIS'
+        stop_command_str = build_oc_command(f'debug node/{node_name} -- chroot /host systemctl stop RETIS', kubeconfig_path)
         print(f"Executing stop command...")
         print(f"DEBUG: Stop command: {stop_command_str}")
         
@@ -316,7 +326,146 @@ def stop_retis_on_node(node_name, dry_run=False):
         print(f"✗ Error stopping RETIS on {node_name}: {e}")
         return False
 
-def run_retis_on_node(node_name, retis_image, working_directory, retis_args=None, dry_run=False):
+def reset_failed_retis_on_node(node_name, kubeconfig_path=None, dry_run=False):
+    """Reset failed RETIS systemd unit on a specific node."""
+    print(f"Resetting failed RETIS unit on node: {node_name}")
+    
+    if dry_run:
+        print(f"[DRY RUN] Would execute command:")
+        reset_cmd_preview = build_oc_command(f'debug node/{node_name} -- chroot /host systemctl reset-failed', kubeconfig_path)
+        print(f"  Reset failed RETIS: {reset_cmd_preview}")
+        return True
+    
+    try:
+        # Reset failed RETIS systemd unit
+        reset_command_str = build_oc_command(f'debug node/{node_name} -- chroot /host systemctl reset-failed', kubeconfig_path)
+        print(f"Executing reset-failed command...")
+        print(f"DEBUG: Reset-failed command: {reset_command_str}")
+        
+        reset_result = subprocess.run(reset_command_str, shell=True, capture_output=True, text=True, timeout=60)
+        
+        if reset_result.returncode != 0:
+            print(f"✗ RETIS reset-failed command failed on {node_name} (exit code: {reset_result.returncode})")
+            if reset_result.stderr:
+                print("Reset-failed error output:")
+                print(reset_result.stderr)
+            if reset_result.stdout:
+                print("Reset-failed output:")
+                print(reset_result.stdout)
+            return False
+        else:
+            print(f"✓ RETIS systemd unit successfully reset on {node_name}")
+            if reset_result.stdout:
+                print("Reset-failed output:")
+                print(reset_result.stdout)
+            return True
+        
+    except subprocess.TimeoutExpired:
+        print(f"✗ RETIS reset-failed command timed out on {node_name}")
+        return False
+    except FileNotFoundError:
+        print("✗ 'oc' command not found. Please ensure OpenShift CLI is installed and in PATH.")
+        return False
+    except Exception as e:
+        print(f"✗ Error resetting failed RETIS on {node_name}: {e}")
+        return False
+
+def download_results_from_node(node_name, working_directory, output_file, local_download_dir="./", kubeconfig_path=None, dry_run=False):
+    """Download RETIS results file from a specific node to local machine."""
+    node_short_name = node_name.split('.')[0]  # Get short name for file naming
+    local_filename = f"{node_short_name}_{output_file}"
+    local_filepath = os.path.join(local_download_dir, local_filename)
+    remote_filepath = f"{working_directory}/{output_file}"
+    
+    print(f"Downloading RETIS results from node: {node_name}")
+    print(f"Remote file: {remote_filepath}")
+    print(f"Local file: {local_filepath}")
+    
+    if dry_run:
+        print(f"[DRY RUN] Would execute commands:")
+        debug_cmd_preview = build_oc_command(f'debug node/{node_name} --to-namespace=default -- sleep 300', kubeconfig_path)
+        print(f"  1. Start debug pod: {debug_cmd_preview}")
+        print(f"  2. Copy file: oc cp default/{{debug_pod_name}}:/host{remote_filepath} {local_filepath}")
+        return True
+    
+    try:
+        # Check if remote file exists first
+        check_cmd = build_oc_command(f'debug node/{node_name} -- chroot /host ls -la {remote_filepath}', kubeconfig_path)
+        print(f"Checking if results file exists on {node_name}...")
+        
+        check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, timeout=30)
+        
+        if check_result.returncode != 0:
+            print(f"⚠ Results file {remote_filepath} not found on {node_name}")
+            if check_result.stderr:
+                print(f"Check error: {check_result.stderr}")
+            return False
+        
+        print(f"✓ Results file found on {node_name}")
+        if check_result.stdout:
+            print(f"File info: {check_result.stdout.strip()}")
+        
+        # Start a debug pod for file copying
+        debug_cmd = build_oc_command(f'debug node/{node_name} --to-namespace=default -- sleep 300', kubeconfig_path)
+        print(f"Starting debug pod on {node_name}...")
+        
+        # Run the debug command in background
+        debug_process = subprocess.Popen(debug_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        # Wait for the pod to start
+        time.sleep(10)
+        
+        # Get the debug pod name
+        get_pod_cmd = build_oc_command(f'get pods -n default --no-headers', kubeconfig_path) + f' | grep {node_short_name} | grep debug | head -1 | awk \'{{print $1}}\''
+        pod_result = subprocess.run(get_pod_cmd, shell=True, capture_output=True, text=True, timeout=30)
+        
+        if pod_result.returncode != 0 or not pod_result.stdout.strip():
+            print(f"✗ Failed to find debug pod for {node_name}")
+            debug_process.terminate()
+            return False
+        
+        debug_pod_name = pod_result.stdout.strip()
+        print(f"Using debug pod: {debug_pod_name}")
+        
+        # Create local download directory if it doesn't exist
+        os.makedirs(local_download_dir, exist_ok=True)
+        
+        # Copy the results file from the node to local machine
+        copy_cmd = build_oc_command(f'cp default/{debug_pod_name}:/host{remote_filepath} {local_filepath}', kubeconfig_path)
+        print(f"Downloading file: {copy_cmd}")
+        
+        copy_result = subprocess.run(copy_cmd, shell=True, capture_output=True, text=True, timeout=120)
+        
+        # Terminate the debug pod
+        debug_process.terminate()
+        
+        if copy_result.returncode != 0:
+            print(f"✗ Failed to download results from {node_name}")
+            if copy_result.stderr:
+                print(f"Download error: {copy_result.stderr}")
+            return False
+        
+        # Verify the file was downloaded
+        if os.path.exists(local_filepath):
+            file_size = os.path.getsize(local_filepath)
+            print(f"✓ Results successfully downloaded from {node_name}")
+            print(f"Local file: {local_filepath} ({file_size} bytes)")
+            return True
+        else:
+            print(f"✗ Download failed - local file not found: {local_filepath}")
+            return False
+        
+    except subprocess.TimeoutExpired:
+        print(f"✗ Download operation timed out on {node_name}")
+        return False
+    except FileNotFoundError:
+        print("✗ 'oc' command not found. Please ensure OpenShift CLI is installed and in PATH.")
+        return False
+    except Exception as e:
+        print(f"✗ Error downloading results from {node_name}: {e}")
+        return False
+
+def run_retis_on_node(node_name, retis_image, working_directory, retis_args=None, retis_cmd_str=None, kubeconfig_path=None, dry_run=False):
     """Run the oc debug command with RETIS collection on a specific node."""
     
     # Set default retis_args if not provided (for backwards compatibility)
@@ -328,49 +477,56 @@ def run_retis_on_node(node_name, retis_image, working_directory, retis_args=None
             'stack': True,
             'probe_stack': True,
             'filter_packet': 'tcp port 8080 or tcp port 8081',
-            'retis_extra_args': ''
+            'retis_extra_args': '',
+            'retis_tag': 'v1.5.2'
         }
     
-    # Build the retis collect command arguments
-    retis_cmd_args = ['collect']
-    
-    # Add output file
-    retis_cmd_args.extend(['-o', retis_args['output_file']])
-    
-    # Add boolean flags
-    if retis_args['allow_system_changes']:
-        retis_cmd_args.append('--allow-system-changes')
-    
-    if retis_args['ovs_track']:
-        retis_cmd_args.append('--ovs-track')
-    
-    if retis_args['stack']:
-        retis_cmd_args.append('--stack')
-    
-    if retis_args['probe_stack']:
-        retis_cmd_args.append('--probe-stack')
-    
-    # Add packet filter
-    if retis_args['filter_packet']:
-        retis_cmd_args.extend(['--filter-packet', f"'{retis_args['filter_packet']}'"])
-    
-    # Add any extra arguments
-    if retis_args['retis_extra_args']:
-        retis_cmd_args.extend(retis_args['retis_extra_args'].split())
-    
-    # Join all arguments
-    retis_cmd_str = ' '.join(retis_cmd_args)
+    # Use custom command string if provided, otherwise build from retis_args
+    if retis_cmd_str is None:
+        # Build the retis collect command arguments
+        retis_cmd_args = ['collect']
+        
+        # Add output file
+        retis_cmd_args.extend(['-o', retis_args['output_file']])
+        
+        # Add boolean flags
+        if retis_args['allow_system_changes']:
+            retis_cmd_args.append('--allow-system-changes')
+        
+        if retis_args['ovs_track']:
+            retis_cmd_args.append('--ovs-track')
+        
+        if retis_args['stack']:
+            retis_cmd_args.append('--stack')
+        
+        if retis_args['probe_stack']:
+            retis_cmd_args.append('--probe-stack')
+        
+        # Add packet filter
+        if retis_args['filter_packet']:
+            retis_cmd_args.extend(['--filter-packet', f"'{retis_args['filter_packet']}'"])
+        
+        # Add any extra arguments
+        if retis_args['retis_extra_args']:
+            retis_cmd_args.extend(retis_args['retis_extra_args'].split())
+        
+        # Join all arguments
+        retis_cmd_str = ' '.join(retis_cmd_args)
+        print(f"Built RETIS command from parameters")
+    else:
+        print(f"Using custom RETIS command string")
     
     # Construct the shell command that will be executed after 'sh -c'
     # Use full path to the script since we downloaded it to the working directory
-    shell_command = f"export RETIS_IMAGE='{retis_image}'; {working_directory}/retis_in_container.sh {retis_cmd_str}"
+    shell_command = f"export RETIS_TAG={retis_args['retis_tag']}; export RETIS_IMAGE='{retis_image}'; {working_directory}/retis_in_container.sh {retis_cmd_str}"
     
     # Construct the command as a string for shell=True execution (like manual command)
-    command_str = f'oc debug node/{node_name} -- chroot /host systemd-run --unit="RETIS" --working-directory={working_directory} sh -c "{shell_command}"'
+    command_str = build_oc_command(f'debug node/{node_name} -- chroot /host systemd-run --unit="RETIS" --working-directory={working_directory} sh -c "{shell_command}"', kubeconfig_path)
     
     print(f"\nRunning RETIS collection on node: {node_name}")
     print(f"Working directory: {working_directory}")
     print(f"RETIS Image: {retis_image}")
+    print(f"RETIS Tag: {retis_args['retis_tag']}")
     print(f"RETIS Arguments: {retis_cmd_str}")
     print(f"DEBUG: Shell command: {shell_command}")
     print(f"DEBUG: Full command: {command_str}")
@@ -380,7 +536,7 @@ def run_retis_on_node(node_name, retis_image, working_directory, retis_args=None
         print(f"  1. RETIS collection: {command_str}")
         
         # Display the status check command
-        status_command_str = f'oc debug node/{node_name} -- chroot /host systemctl status RETIS'
+        status_command_str = build_oc_command(f'debug node/{node_name} -- chroot /host systemctl status RETIS', kubeconfig_path)
         print(f"  2. Status check: {status_command_str}")
         return True
     
@@ -403,7 +559,7 @@ def run_retis_on_node(node_name, retis_image, working_directory, retis_args=None
         
         # Check the status of the RETIS systemd unit
         print(f"Checking RETIS systemd unit status on {node_name}...")
-        status_command_str = f'oc debug node/{node_name} -- chroot /host systemctl status RETIS'
+        status_command_str = build_oc_command(f'debug node/{node_name} -- chroot /host systemctl status RETIS', kubeconfig_path)
         
         status_result = subprocess.run(status_command_str, shell=True, capture_output=True, text=True, timeout=60)
         
@@ -466,23 +622,40 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage
+  # RETIS collection (runs in dry-run mode by default)
   python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker.*"
   python3 arc.py --kubeconfig /path/to/kubeconfig --workload-filter "ovn"
   python3 arc.py --kubeconfig ~/.kube/config --node-filter "compute" --workload-filter "pod.*networking"
   
-  # Custom RETIS parameters
+  # Actually execute RETIS collection (use --start)
+  python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker.*" --start
+  python3 arc.py --kubeconfig ~/.kube/config --workload-filter "ovn" --start
+  
+  # Custom RETIS parameters (dry-run by default)
   python3 arc.py --kubeconfig ~/.kube/config --output-file trace.json --filter-packet "tcp port 443"
   python3 arc.py --kubeconfig ~/.kube/config --no-ovs-track --no-stack --filter-packet "udp port 53"
   python3 arc.py --kubeconfig ~/.kube/config --retis-extra-args "--max-events 10000"
   
+  # Custom RETIS command (overrides all other RETIS options)
+  python3 arc.py --kubeconfig ~/.kube/config --retis-command "collect -o custom.json --max-events 5000" --start
+  python3 arc.py --kubeconfig ~/.kube/config --retis-command "profile -o profile.json -t 30" --start
+  
   # Infrastructure options
-  python3 arc.py --kubeconfig ~/.kube/config --retis-image "custom-registry/retis:latest"
+  python3 arc.py --kubeconfig ~/.kube/config --retis-image "custom-registry/retis:latest" --start
+  python3 arc.py --kubeconfig ~/.kube/config --retis-tag "v1.6.0" --start
   python3 arc.py --kubeconfig ~/.kube/config --working-directory /tmp --dry-run
   
-  # Stop operations
+  # Stop operations (execute normally)
   python3 arc.py --kubeconfig ~/.kube/config --stop --parallel
-  python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker" --stop --dry-run
+  python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker" --stop --dry-run  # preview only
+  
+  # Reset failed operations (execute normally)
+  python3 arc.py --kubeconfig ~/.kube/config --reset-failed --parallel
+  python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker" --reset-failed --dry-run  # preview only
+  
+  # Download results (execute normally)
+  python3 arc.py --kubeconfig ~/.kube/config --download-results
+  python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker-2*" --download-results --dry-run  # preview only
   
   # Interactive mode
   python3 arc.py  # Will prompt for kubeconfig path
@@ -511,6 +684,12 @@ Examples:
         type=str
     )
     parser.add_argument(
+        '--retis-tag',
+        help='RETIS version tag to use (default: v1.5.2)',
+        default='v1.5.2',
+        type=str
+    )
+    parser.add_argument(
         '--working-directory',
         help='Working directory for the RETIS collection (default: /var/tmp)',
         default='/var/tmp',
@@ -518,7 +697,12 @@ Examples:
     )
     parser.add_argument(
         '--dry-run',
-        help='Show what commands would be executed without running them',
+        help='Show what commands would be executed without running them (default for RETIS collection)',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--start',
+        help='Actually execute RETIS collection (overrides default dry-run behavior for collection)',
         action='store_true'
     )
     parser.add_argument(
@@ -529,6 +713,16 @@ Examples:
     parser.add_argument(
         '--stop',
         help='Stop RETIS collection on filtered nodes',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--reset-failed',
+        help='Reset failed RETIS systemd units on filtered nodes',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--download-results',
+        help='Download all events.json files from filtered nodes to local machine',
         action='store_true'
     )
     # RETIS collection configuration parameters
@@ -594,8 +788,27 @@ Examples:
         default='',
         type=str
     )
+    parser.add_argument(
+        '--retis-command',
+        help='Complete RETIS command string (overrides all other RETIS options)',
+        type=str
+    )
     
     args = parser.parse_args()
+    
+    # Set dry-run behavior based on operation type
+    # Main RETIS collection defaults to dry-run, utility operations execute normally
+    is_utility_operation = (getattr(args, 'stop', False) or 
+                           getattr(args, 'reset_failed', False) or 
+                           getattr(args, 'download_results', False))
+    
+    if args.start:
+        # --start always overrides --dry-run when both are present
+        args.dry_run = False
+    elif not args.dry_run and not is_utility_operation:
+        # Default to dry-run only for main RETIS collection operation
+        args.dry_run = True
+    # For utility operations, keep the original --dry-run value (False by default)
     
     # Process boolean flag conflicts
     if args.no_allow_system_changes:
@@ -608,9 +821,23 @@ Examples:
         args.probe_stack = False
     
     # Validate arguments
+    if args.stop and getattr(args, 'reset_failed', False):
+        print("Error: --stop and --reset-failed cannot be used together")
+        return
+    
+    if args.stop and getattr(args, 'download_results', False):
+        print("Error: --stop and --download-results cannot be used together")
+        return
+    
+    if getattr(args, 'reset_failed', False) and getattr(args, 'download_results', False):
+        print("Error: --reset-failed and --download-results cannot be used together")
+        return
+    
     if args.stop:
         if args.retis_image != 'image-registry.openshift-image-registry.svc:5000/default/retis':
             print("Warning: --retis-image is ignored when using --stop")
+        if args.retis_tag != 'v1.5.2':
+            print("Warning: --retis-tag is ignored when using --stop")
         if args.working_directory != '/var/tmp':
             print("Warning: --working-directory is ignored when using --stop")
         # These retis-specific arguments are ignored during stop
@@ -632,6 +859,57 @@ Examples:
         
         if ignored_args:
             print(f"Warning: RETIS collection arguments are ignored when using --stop: {', '.join(ignored_args)}")
+    
+    if getattr(args, 'reset_failed', False):
+        if args.retis_image != 'image-registry.openshift-image-registry.svc:5000/default/retis':
+            print("Warning: --retis-image is ignored when using --reset-failed")
+        if args.retis_tag != 'v1.5.2':
+            print("Warning: --retis-tag is ignored when using --reset-failed")
+        if args.working_directory != '/var/tmp':
+            print("Warning: --working-directory is ignored when using --reset-failed")
+        # These retis-specific arguments are ignored during reset-failed
+        ignored_args = []
+        if args.output_file != 'events.json':
+            ignored_args.append('--output-file')
+        if not args.allow_system_changes:
+            ignored_args.append('--no-allow-system-changes')
+        if not args.ovs_track:
+            ignored_args.append('--no-ovs-track')
+        if not args.stack:
+            ignored_args.append('--no-stack')
+        if not args.probe_stack:
+            ignored_args.append('--no-probe-stack')
+        if args.filter_packet != 'tcp port 8080 or tcp port 8081':
+            ignored_args.append('--filter-packet')
+        if args.retis_extra_args:
+            ignored_args.append('--retis-extra-args')
+        
+        if ignored_args:
+            print(f"Warning: RETIS collection arguments are ignored when using --reset-failed: {', '.join(ignored_args)}")
+    
+    if getattr(args, 'download_results', False):
+        if args.retis_image != 'image-registry.openshift-image-registry.svc:5000/default/retis':
+            print("Warning: --retis-image is ignored when using --download-results")
+        if args.retis_tag != 'v1.5.2':
+            print("Warning: --retis-tag is ignored when using --download-results")
+        # Note: --working-directory and --output-file are actually used by download-results
+        # These retis-specific arguments are ignored during download-results
+        ignored_args = []
+        if not args.allow_system_changes:
+            ignored_args.append('--no-allow-system-changes')
+        if not args.ovs_track:
+            ignored_args.append('--no-ovs-track')
+        if not args.stack:
+            ignored_args.append('--no-stack')
+        if not args.probe_stack:
+            ignored_args.append('--no-probe-stack')
+        if args.filter_packet != 'tcp port 8080 or tcp port 8081':
+            ignored_args.append('--filter-packet')
+        if args.retis_extra_args:
+            ignored_args.append('--retis-extra-args')
+        
+        if ignored_args:
+            print(f"Warning: RETIS collection arguments are ignored when using --download-results: {', '.join(ignored_args)}")
     
     # Validate that at least one filter is provided if the user wants to be specific
     if not args.node_filter and not args.workload_filter:
@@ -706,7 +984,7 @@ Examples:
             import concurrent.futures
             
             def stop_with_progress(node):
-                return stop_retis_on_node(node, args.dry_run)
+                return stop_retis_on_node(node, kubeconfig_path, args.dry_run)
             
             success_count = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(nodes), 5)) as executor:
@@ -725,7 +1003,7 @@ Examples:
             success_count = 0
             for i, node in enumerate(nodes, 1):
                 print(f"\n--- Stopping RETIS on node {i}/{len(nodes)}: {node} ---")
-                success = stop_retis_on_node(node, args.dry_run)
+                success = stop_retis_on_node(node, kubeconfig_path, args.dry_run)
                 if success:
                     success_count += 1
         
@@ -750,8 +1028,126 @@ Examples:
         print("Script finished.")
         return
     
+    # --- Handle reset-failed operation ---
+    if getattr(args, 'reset_failed', False):
+        print(f"\nPreparing to reset failed RETIS units on {len(nodes)} nodes...")
+        
+        if args.dry_run:
+            print("\n[DRY RUN] The following reset-failed commands would be executed:")
+        
+        # Reset failed RETIS on each node
+        if args.parallel:
+            print("\nResetting failed RETIS units in parallel mode...")
+            import concurrent.futures
+            
+            def reset_with_progress(node):
+                return reset_failed_retis_on_node(node, kubeconfig_path, args.dry_run)
+            
+            success_count = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(nodes), 5)) as executor:
+                future_to_node = {executor.submit(reset_with_progress, node): node for node in nodes}
+                
+                for future in concurrent.futures.as_completed(future_to_node):
+                    node = future_to_node[future]
+                    try:
+                        success = future.result()
+                        if success:
+                            success_count += 1
+                    except Exception as e:
+                        print(f"✗ Exception occurred resetting failed RETIS on node {node}: {e}")
+        else:
+            print("\nResetting failed RETIS units sequentially...")
+            success_count = 0
+            for i, node in enumerate(nodes, 1):
+                print(f"\n--- Resetting failed RETIS on node {i}/{len(nodes)}: {node} ---")
+                success = reset_failed_retis_on_node(node, kubeconfig_path, args.dry_run)
+                if success:
+                    success_count += 1
+        
+        # Summary for reset-failed operation
+        print(f"\n{'=' * 50}")
+        print("RETIS Reset-Failed Summary")
+        print(f"{'=' * 50}")
+        print(f"Total nodes: {len(nodes)}")
+        print(f"Successfully reset: {success_count}")
+        print(f"Failed to reset: {len(nodes) - success_count}")
+        
+        if args.dry_run:
+            print("\n[DRY RUN] No actual commands were executed.")
+        else:
+            if success_count == len(nodes):
+                print("\n✓ RETIS failed units reset on all nodes!")
+            elif success_count > 0:
+                print(f"\n⚠ RETIS failed units reset on {success_count}/{len(nodes)} nodes.")
+            else:
+                print("\n✗ Failed to reset RETIS failed units on all nodes.")
+        
+        print("Script finished.")
+        return
+    
+    # --- Handle download-results operation ---
+    if getattr(args, 'download_results', False):
+        print(f"\nPreparing to download RETIS results from {len(nodes)} nodes...")
+        print(f"Working Directory: {args.working_directory}")
+        print(f"Output File: {args.output_file}")
+        
+        if args.dry_run:
+            print("\n[DRY RUN] The following download commands would be executed:")
+        
+        # Download results from each node
+        if args.parallel:
+            print("\nDownloading RETIS results in parallel mode...")
+            import concurrent.futures
+            
+            def download_with_progress(node):
+                return download_results_from_node(node, args.working_directory, args.output_file, "./", kubeconfig_path, args.dry_run)
+            
+            success_count = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(nodes), 5)) as executor:
+                future_to_node = {executor.submit(download_with_progress, node): node for node in nodes}
+                
+                for future in concurrent.futures.as_completed(future_to_node):
+                    node = future_to_node[future]
+                    try:
+                        success = future.result()
+                        if success:
+                            success_count += 1
+                    except Exception as e:
+                        print(f"✗ Exception occurred downloading results from node {node}: {e}")
+        else:
+            print("\nDownloading RETIS results sequentially...")
+            success_count = 0
+            for i, node in enumerate(nodes, 1):
+                print(f"\n--- Downloading results from node {i}/{len(nodes)}: {node} ---")
+                success = download_results_from_node(node, args.working_directory, args.output_file, "./", kubeconfig_path, args.dry_run)
+                if success:
+                    success_count += 1
+        
+        # Summary for download operation
+        print(f"\n{'=' * 50}")
+        print("RETIS Download Summary")
+        print(f"{'=' * 50}")
+        print(f"Total nodes: {len(nodes)}")
+        print(f"Successfully downloaded: {success_count}")
+        print(f"Failed to download: {len(nodes) - success_count}")
+        
+        if args.dry_run:
+            print("\n[DRY RUN] No actual commands were executed.")
+        else:
+            if success_count == len(nodes):
+                print("\n✓ All RETIS results downloaded successfully!")
+            elif success_count > 0:
+                print(f"\n⚠ RETIS results downloaded from {success_count}/{len(nodes)} nodes.")
+                print("Files downloaded to current directory with node name prefix.")
+            else:
+                print("\n✗ Failed to download RETIS results from all nodes.")
+        
+        print("Script finished.")
+        return
+    
     print(f"\nPreparing to run RETIS collection on {len(nodes)} nodes...")
     print(f"RETIS Image: {args.retis_image}")
+    print(f"RETIS Tag: {args.retis_tag}")
     print(f"Working Directory: {args.working_directory}")
     
     if args.dry_run:
@@ -778,7 +1174,7 @@ Examples:
         
         for i, node in enumerate(nodes, 1):
             print(f"\n--- Setting up script on node {i}/{len(nodes)}: {node} ---")
-            setup_success = setup_script_on_node(node, args.working_directory, local_script_path, dry_run=args.dry_run)
+            setup_success = setup_script_on_node(node, args.working_directory, local_script_path, kubeconfig_path, args.dry_run)
             if setup_success:
                 setup_success_count += 1
             else:
@@ -805,8 +1201,35 @@ Examples:
             'stack': args.stack,
             'probe_stack': args.probe_stack,
             'filter_packet': args.filter_packet,
-            'retis_extra_args': args.retis_extra_args
+            'retis_extra_args': args.retis_extra_args,
+            'retis_tag': args.retis_tag
         }
+        
+        # Use custom RETIS command if provided
+        custom_retis_cmd = getattr(args, 'retis_command', None)
+        
+        # Warn if custom command is used with individual RETIS parameters
+        if custom_retis_cmd:
+            print(f"Using custom RETIS command: {custom_retis_cmd}")
+            ignored_args = []
+            if args.output_file != 'events.json':
+                ignored_args.append('--output-file')
+            if not args.allow_system_changes:
+                ignored_args.append('--no-allow-system-changes')
+            if not args.ovs_track:
+                ignored_args.append('--no-ovs-track')
+            if not args.stack:
+                ignored_args.append('--no-stack')
+            if not args.probe_stack:
+                ignored_args.append('--no-probe-stack')
+            if args.filter_packet != 'tcp port 8080 or tcp port 8081':
+                ignored_args.append('--filter-packet')
+            if args.retis_extra_args:
+                ignored_args.append('--retis-extra-args')
+            
+            if ignored_args:
+                print(f"Warning: Individual RETIS parameters are ignored when using --retis-command: {', '.join(ignored_args)}")
+                print("The custom command will be used as-is.")
         
         # --- Run RETIS collection on each node ---
         if args.parallel:
@@ -815,7 +1238,7 @@ Examples:
             import threading
             
             def run_with_progress(node):
-                return run_retis_on_node(node, args.retis_image, args.working_directory, retis_args, args.dry_run)
+                return run_retis_on_node(node, args.retis_image, args.working_directory, retis_args, custom_retis_cmd, kubeconfig_path, args.dry_run)
             
             success_count = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(nodes), 5)) as executor:
@@ -834,7 +1257,7 @@ Examples:
             success_count = 0
             for i, node in enumerate(nodes, 1):
                 print(f"\n--- Processing node {i}/{len(nodes)} ---")
-                success = run_retis_on_node(node, args.retis_image, args.working_directory, retis_args, args.dry_run)
+                success = run_retis_on_node(node, args.retis_image, args.working_directory, retis_args, custom_retis_cmd, kubeconfig_path, args.dry_run)
                 if success:
                     success_count += 1
         
