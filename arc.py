@@ -60,12 +60,62 @@ def get_nodes_from_kubernetes(api_instance, name_filter=None, workload_filter=No
         
         print(f"✓ Found {len(all_nodes)} worker nodes")
         
+        # Show actual node names for debugging
+        if all_nodes:
+            print("Available worker nodes:")
+            for i, node in enumerate(all_nodes, 1):
+                print(f"  {i}. {node}")
+        
         # Apply name filtering if specified
         filtered_nodes = all_nodes
         if name_filter:
-            # Use fnmatch for glob-style pattern matching (supports * and ? wildcards)
-            filtered_nodes = [node for node in filtered_nodes if fnmatch.fnmatch(node.lower(), name_filter.lower())]
+            print(f"Applying name filter: '{name_filter}'")
+            
+            # Try multiple matching strategies for better user experience
+            matched_nodes = []
+            
+            # Strategy 1: Exact match (case-insensitive)
+            exact_matches = [node for node in filtered_nodes if node.lower() == name_filter.lower()]
+            if exact_matches:
+                matched_nodes = exact_matches
+                print(f"  Using exact match strategy")
+            
+            # Strategy 2: Substring match (case-insensitive)
+            elif not exact_matches:
+                substring_matches = [node for node in filtered_nodes if name_filter.lower() in node.lower()]
+                if substring_matches:
+                    matched_nodes = substring_matches
+                    print(f"  Using substring match strategy")
+            
+            # Strategy 3: Glob pattern matching (supports * and ? wildcards)
+            if not matched_nodes:
+                glob_matches = [node for node in filtered_nodes if fnmatch.fnmatch(node.lower(), name_filter.lower())]
+                if glob_matches:
+                    matched_nodes = glob_matches
+                    print(f"  Using glob pattern match strategy")
+            
+            # Strategy 4: If filter contains wildcards but no matches, suggest adding wildcards
+            if not matched_nodes and not any(wildcard in name_filter for wildcard in ['*', '?']):
+                # Try with wildcards automatically
+                wildcard_pattern = f"*{name_filter.lower()}*"
+                wildcard_matches = [node for node in filtered_nodes if fnmatch.fnmatch(node.lower(), wildcard_pattern)]
+                if wildcard_matches:
+                    matched_nodes = wildcard_matches
+                    print(f"  Using automatic wildcard pattern: '{wildcard_pattern}'")
+            
+            filtered_nodes = matched_nodes
             print(f"✓ After name filter '{name_filter}': {len(filtered_nodes)} nodes")
+            
+            # Show which nodes matched for debugging
+            if filtered_nodes:
+                print("Matched nodes:")
+                for i, node in enumerate(filtered_nodes, 1):
+                    print(f"  {i}. {node}")
+            else:
+                print("No nodes matched the filter. Try using:")
+                print(f"  - Partial name: part of the node name")
+                print(f"  - Wildcard pattern: '*{name_filter}*' or '{name_filter}*'")
+                print(f"  - Available nodes are listed above")
         
         # Apply workload filtering if specified
         if workload_filter and filtered_nodes:
@@ -623,7 +673,8 @@ def main():
         epilog="""
 Examples:
   # RETIS collection (runs in dry-run mode by default)
-  python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker.*"
+  python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker-1"        # exact or substring match
+  python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker*"         # wildcard pattern
   python3 arc.py --kubeconfig /path/to/kubeconfig --workload-filter "ovn"
   python3 arc.py --kubeconfig ~/.kube/config --node-filter "compute" --workload-filter "pod.*networking"
   
@@ -669,7 +720,7 @@ Examples:
     )
     parser.add_argument(
         '--node-filter', '-n',
-        help='Regular expression to filter nodes by name (e.g., "worker.*", "compute")',
+        help='Filter nodes by name. Supports: exact match, substring match, or glob patterns with wildcards (e.g., "worker-1", "worker", "worker*", "*worker*")',
         type=str
     )
     parser.add_argument(
