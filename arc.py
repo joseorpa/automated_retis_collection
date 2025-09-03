@@ -10,6 +10,8 @@ import time
 import json
 import re
 import fnmatch
+import ssl
+import urllib3
 from kubernetes import client, config
 
 def get_kubeconfig_path(args):
@@ -844,6 +846,11 @@ Examples:
         help='Complete RETIS command string (overrides all other RETIS options)',
         type=str
     )
+    parser.add_argument(
+        '--skip-tls-verification',
+        help='Skip TLS certificate verification when connecting to Kubernetes API',
+        action='store_true'
+    )
     
     args = parser.parse_args()
     
@@ -1001,6 +1008,22 @@ Examples:
             print(f"Kubeconfig file not found at: {kubeconfig_path}")
             print("Please verify the file path exists.")
             return
+
+    # --- Handle TLS verification settings ---
+    if args.skip_tls_verification:
+        print("Warning: Skipping TLS certificate verification. This is insecure and should only be used for testing.")
+        
+        # Get the current configuration
+        configuration = client.Configuration.get_default_copy()
+        
+        # Disable SSL verification
+        configuration.verify_ssl = False
+        
+        # Disable urllib3 SSL warnings when verification is disabled
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        # Set the configuration as default
+        client.Configuration.set_default(configuration)
 
     # --- Create Kubernetes API client ---
     core_v1 = client.CoreV1Api()
