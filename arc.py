@@ -14,6 +14,12 @@ import ssl
 import urllib3
 from kubernetes import client, config
 
+try:
+    from retis import EventFile
+    RETIS_ANALYSIS_AVAILABLE = True
+except ImportError:
+    RETIS_ANALYSIS_AVAILABLE = False
+
 def get_kubeconfig_path(args):
     """Get the kubeconfig path from arguments or user input."""
     if args.kubeconfig:
@@ -425,7 +431,7 @@ def reset_failed_retis_on_node(node_name, kubeconfig_path=None, dry_run=False):
 def download_results_from_node(node_name, working_directory, output_file, local_download_dir="./", kubeconfig_path=None, dry_run=False):
     """Download RETIS results file from a specific node to local machine."""
     node_short_name = node_name.split('.')[0]  # Get short name for file naming
-    local_filename = f"{node_short_name}_{output_file}"
+    local_filename = f"arc_{node_short_name}_{output_file}"
     local_filepath = os.path.join(local_download_dir, local_filename)
     remote_filepath = f"{working_directory}/{output_file}"
     
@@ -665,6 +671,41 @@ def run_retis_on_node(node_name, retis_image, working_directory, retis_args=None
         print(f"✗ Error running command on {node_name}: {e}")
         return False
 
+def print_retis_events(file_paths):
+    """Print RETIS events from result files using the retis Python library."""
+    if not RETIS_ANALYSIS_AVAILABLE:
+        print("✗ RETIS Python library is not available. Please install it with: pip install retis")
+        return False
+    
+    if not file_paths:
+        print("✗ No files specified for analysis")
+        return False
+    
+    print(f"Reading events from {len(file_paths)} RETIS result file(s)...")
+    
+    for file_path in file_paths:
+        print(f"\n=== Processing file: {file_path} ===")
+        
+        if not os.path.exists(file_path):
+            print(f"⚠ File not found: {file_path}")
+            continue
+        
+        try:
+            reader = EventFile(file_path)
+            event_count = 0
+            
+            for event in reader.events():
+                print(event)
+                event_count += 1
+            
+            print(f"\n✓ Processed {event_count} events from {file_path}")
+            
+        except Exception as e:
+            print(f"✗ Error reading {file_path}: {e}")
+            continue
+    
+    return True
+
 def main():
     """Main function to get nodes and run RETIS collection."""
     
@@ -709,6 +750,11 @@ Examples:
   # Download results (execute normally)
   python3 arc.py --kubeconfig ~/.kube/config --download-results
   python3 arc.py --kubeconfig ~/.kube/config --node-filter "worker-2*" --download-results --dry-run  # preview only
+  
+  # Print RETIS events (no Kubernetes connection required, downloads results as arc_*_events.json)
+  python3 arc.py --analyze                                              # auto-discover arc_*_events.json files
+  python3 arc.py --analyze --analysis-files arc_worker-1_events.json arc_worker-2_events.json
+  python3 arc.py --analyze --analysis-files retis.data
   
   # Interactive mode
   python3 arc.py  # Will prompt for kubeconfig path
@@ -851,6 +897,17 @@ Examples:
         help='Skip TLS certificate verification when connecting to Kubernetes API',
         action='store_true'
     )
+    parser.add_argument(
+        '--analyze',
+        help='Print events from downloaded RETIS result files',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--analysis-files',
+        help='Specific RETIS result files to read (space-separated). If not provided, will read all arc_*_events.json files in current directory',
+        nargs='*',
+        type=str
+    )
     
     args = parser.parse_args()
     
@@ -889,6 +946,10 @@ Examples:
     
     if getattr(args, 'reset_failed', False) and getattr(args, 'download_results', False):
         print("Error: --reset-failed and --download-results cannot be used together")
+        return
+    
+    if getattr(args, 'analyze', False) and (args.stop or getattr(args, 'reset_failed', False) or getattr(args, 'download_results', False)):
+        print("Error: --analyze cannot be used with --stop, --reset-failed, or --download-results")
         return
     
     if args.stop:
@@ -979,6 +1040,38 @@ Examples:
             if confirmation not in ['y', 'yes']:
                 print("Operation cancelled.")
                 return
+
+    # --- Handle analysis operation (doesn't require Kubernetes connection) ---
+    if getattr(args, 'analyze', False):
+        print("Starting RETIS events printing...")
+        
+        # Determine which files to read
+        analysis_files = []
+        if getattr(args, 'analysis_files', None):
+            # Use specified files
+            analysis_files = args.analysis_files
+            print(f"Reading specified files: {analysis_files}")
+        else:
+            # Auto-discover files matching pattern arc_*_events.json
+            import glob
+            pattern = "arc_*_events.json"
+            analysis_files = glob.glob(pattern)
+            if analysis_files:
+                print(f"Auto-discovered {len(analysis_files)} result files: {analysis_files}")
+            else:
+                print(f"No files found matching pattern '{pattern}' in current directory")
+                print("Use --analysis-files to specify files explicitly, or use --download-results first to download files")
+                return
+        
+        # Print events
+        success = print_retis_events(file_paths=analysis_files)
+        
+        if success:
+            print("\nEvent printing completed successfully!")
+        else:
+            print("\nEvent printing failed!")
+            
+        return
 
     # Get kubeconfig path
     kubeconfig_path = get_kubeconfig_path(args)
