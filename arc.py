@@ -26,9 +26,9 @@ except ImportError:
 
 class KubernetesDebugPodManager:
     """
-    A modern, Kubernetes-native replacement for 'oc debug node' commands.
+    A Kubernetes-native replacement for 'oc debug node' commands.
     
-    This class provides a clean, modular interface for creating debug pods,
+    This class provides an interface for creating debug pods,
     executing commands, and managing file operations on Kubernetes nodes.
     """
     
