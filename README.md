@@ -1,10 +1,10 @@
 # Automated RETIS Collection (ARC)
 
-A Python script for running RETIS network packet collection on OpenShift/Kubernetes worker nodes with advanced filtering capabilities.
+A Python script for running RETIS network packet collection on Kubernetes worker nodes with advanced filtering capabilities using a modern, Kubernetes-native approach.
 
 ## 🎯 Overview
 
-This tool automates the deployment and execution of RETIS (Real-time Traffic Inspection System) on Kubernetes worker nodes. It provides flexible node selection through name patterns and workload filtering, making it easy to target specific nodes for network analysis.
+This tool automates the deployment and execution of RETIS (Real-time Traffic Inspection System) on Kubernetes worker nodes using a **pure Kubernetes-native implementation**. It provides flexible node selection through name patterns and workload filtering, making it easy to target specific nodes for network analysis. The tool uses privileged debug pods and the Kubernetes API directly - **no OpenShift CLI tools required**.
 
 ## ✨ Features
 
@@ -17,13 +17,20 @@ This tool automates the deployment and execution of RETIS (Real-time Traffic Ins
 - **🔧 Custom Commands**: Full control over RETIS commands and arguments
 - **🏷️ Version Control**: Configurable RETIS version tags (defaults to stable v1.5.2)
 - **🔌 Native Kubernetes Integration**: Uses Kubernetes Python client API for reliable cluster interaction
+- **🐳 Modern Debug Pod Architecture**: Creates privileged debug pods with proper security contexts
+- **🧹 Automatic Cleanup**: Smart pod lifecycle management with automatic resource cleanup
+- **⚡ No CLI Dependencies**: Pure Python/Kubernetes API implementation - no `oc` or `kubectl` required
 
 ## 📋 Requirements
 
 - Python 3.6+
-- Access to a Kubernetes/OpenShift cluster
+- Access to a Kubernetes cluster (works with any Kubernetes distribution including OpenShift)
 - Valid kubeconfig file
-- Appropriate RBAC permissions to list nodes and pods
+- Appropriate RBAC permissions to:
+  - List and read nodes and pods
+  - Create and delete pods in the target namespace (default: `default`)
+  - Execute commands in pods (`pods/exec`)
+- **No CLI tools required** - Pure Python implementation using Kubernetes API
 
 ## 🚀 Installation
 
@@ -355,18 +362,33 @@ python3 arc.py --kubeconfig ~/.kube/config --reset-failed --dry-run
 3. **Workload Filtering**: Applied second by checking pods on remaining nodes
 4. **Final Validation**: Ensures at least one node matches before proceeding
 
+### Debug Pod Architecture
+ARC uses a modern **KubernetesDebugPodManager** that creates privileged debug pods with:
+- **Security Context**: Privileged access with `SYS_ADMIN`, `NET_ADMIN`, and `SYS_PTRACE` capabilities
+- **Host Access**: Full host filesystem mounted at `/host`, host PID and network namespaces
+- **Tolerations**: Can run on any node including control-plane nodes
+- **Context Management**: Automatic pod lifecycle with cleanup on completion
+
 ### RETIS Collection Process
 1. **Script Download**: Downloads `retis_in_container.sh` to local temp file
-2. **Node Setup**: Copies script to each target node's working directory
-3. **Execution**: Runs RETIS using systemd-run for proper process management
-4. **Monitoring**: Checks systemd unit status for success/failure
-5. **Cleanup**: Removes temporary files
+2. **Debug Pod Creation**: Creates privileged debug pod on target node using Kubernetes API
+3. **File Transfer**: Copies script to node via debug pod using base64 encoding
+4. **Execution**: Runs RETIS using systemd-run through debug pod with chroot access
+5. **Monitoring**: Checks systemd unit status for success/failure via debug pod
+6. **Cleanup**: Automatically removes debug pods and temporary files
+
+### Debug Pod Operations
+- **Command Execution**: Uses Kubernetes `stream` API for real-time command execution
+- **File Operations**: Secure file transfer using base64 encoding through pod exec
+- **Chroot Support**: All host operations use `chroot /host` for proper system access
+- **Error Handling**: Robust exception handling with detailed error reporting
 
 ### Error Handling
 - **Kubernetes API Errors**: Graceful handling of connection and permission issues
 - **Node Access Errors**: Individual node failures don't stop other nodes
-- **Timeout Protection**: All operations have reasonable timeout limits
-- **Resource Cleanup**: Temporary files are always cleaned up
+- **Pod Creation Failures**: Automatic cleanup and detailed error reporting
+- **Timeout Protection**: All operations have configurable timeout limits
+- **Resource Cleanup**: Debug pods and temporary files are always cleaned up
 
 ## 🚨 Troubleshooting
 
@@ -396,9 +418,15 @@ pip install "kubernetes>=18.20.0"
 - Check that the output file exists on target nodes
 - Verify working directory and file names
 
-**"oc command not found" (shouldn't occur with current version)**
-- This script now uses Kubernetes API directly
-- No need for `oc` CLI tool
+**"Failed to create debug pod" or permission errors**
+- Ensure RBAC permissions include pod creation and execution in target namespace
+- Check if the namespace exists (default: `default`)
+- Verify cluster has sufficient resources for debug pods
+
+**"Debug pod creation timeout"**
+- Check node availability and resource constraints
+- Verify image registry access (default: `registry.redhat.io/ubi8/ubi:latest`)
+- Increase timeout if needed for slow clusters
 
 ### Debug Tips
 
@@ -411,32 +439,42 @@ pip install "kubernetes>=18.20.0"
 
 ## 🔄 Recent Changes
 
+### 🚀 Version 3.0 - Kubernetes-Native Debug Pod Architecture
+
+#### 🐳 Major Architecture Overhaul:
+- **KubernetesDebugPodManager**: Brand new debug pod manager class for Kubernetes-native operations
+- **Privileged Debug Pods**: Creates secure debug pods with proper security contexts and capabilities
+- **Host Access**: Full host filesystem access via volume mounts and chroot operations
+- **Stream API Integration**: Real-time command execution using Kubernetes stream API
+- **Automatic Cleanup**: Smart pod lifecycle management with context managers
+
+#### 🔧 Technical Improvements:
+- **Zero CLI Dependencies**: Completely eliminated OpenShift CLI (`oc`) requirements
+- **Pure Kubernetes API**: Direct API calls for all operations (pod creation, exec, file transfer)
+- **Enhanced Security**: Proper RBAC requirements and security context configuration
+- **Better Error Handling**: Comprehensive exception handling for pod operations
+- **Resource Management**: Automatic debug pod cleanup and resource management
+
+#### ⚡ Performance & Reliability:
+- **Faster Operations**: Direct API calls eliminate subprocess overhead
+- **Better Concurrency**: Native support for parallel pod operations
+- **Improved Timeout**: Configurable timeouts for all pod operations
+- **Robust File Transfer**: Secure base64-encoded file transfer via pod exec
+
 ### 🚀 Version 2.0 - Major Feature Updates
 
-#### ✨ New Features Added:
-- **🛡️ Safe-by-Default**: RETIS collection now defaults to dry-run mode, requires `--start` to execute
-- **📥 Results Download**: New `--download-results` operation to fetch all events.json files
+#### ✨ Previous Features Added:
+- **🛡️ Safe-by-Default**: RETIS collection defaults to dry-run mode, requires `--start` to execute
+- **📥 Results Download**: `--download-results` operation to fetch all events.json files
 - **🔧 Custom Commands**: `--retis-command` option for full control over RETIS arguments
 - **🏷️ Version Control**: `--retis-tag` option to specify RETIS version (default: v1.5.2)
 - **🔄 System Maintenance**: `--reset-failed` operation to reset failed systemd units
-- **🔍 Fixed Node Filtering**: Now uses glob patterns (`worker-2*`) instead of regex for intuitive matching
+- **🔍 Node Filtering**: Glob patterns (`worker-2*`) for intuitive node matching
 
 #### 🛡️ Enhanced Safety:
 - **Default Dry-Run**: Collection operations preview by default, utility operations execute immediately
 - **Smart Behavior**: Stop, reset-failed, and download operations work without `--start` flag
 - **Clear Warnings**: Alerts when conflicting options are used together
-
-#### ⚡ Improved User Experience:
-- **Intuitive Filtering**: Glob patterns work like shell wildcards (`worker-2*`, `worker*`)
-- **Automatic File Naming**: Downloaded files use node names to prevent overwrites
-- **Comprehensive Help**: Updated examples and documentation for all features
-
-### 🔄 Previous Updates - Kubernetes API Migration:
-- **No CLI Dependencies**: Removed dependency on `oc` command
-- **Better Error Handling**: Native Kubernetes API exceptions
-- **Improved Performance**: Direct API calls instead of subprocess overhead
-- **Enhanced Reliability**: No CLI output parsing required
-- **Type Safety**: Direct object access instead of JSON parsing
 
 ### 📈 Backward Compatibility:
 - All existing functionality preserved
@@ -456,5 +494,6 @@ Contributions, issues, and feature requests are welcome!
 
 For issues related to:
 - **RETIS**: See [RETIS documentation](https://github.com/retis-org/retis)
-- **OpenShift**: Consult OpenShift documentation
-- **Kubernetes API**: Check Kubernetes Python client documentation
+- **Kubernetes**: Consult Kubernetes documentation and cluster-specific guides
+- **Kubernetes Python Client**: Check [official Kubernetes Python client documentation](https://github.com/kubernetes-client/python)
+- **Debug Pods**: Review Kubernetes pod security policies and RBAC configuration
