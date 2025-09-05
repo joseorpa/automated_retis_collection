@@ -57,9 +57,14 @@ This tool automates the deployment and execution of RETIS (Real-time Traffic Ins
    ```bash
    pip install -r requirements.txt
    ```
-   or
+   or install core dependencies manually:
    ```bash
-   pip install "kubernetes>=18.20.0"
+   pip install "kubernetes>=30.0.0" "urllib3>=2.0.0"
+   ```
+   
+   For RETIS analysis features, also install:
+   ```bash
+   pip install "retis>=1.6.0"
    ```
 
 ## 🎮 Usage
@@ -396,7 +401,7 @@ ARC uses a modern **KubernetesDebugPodManager** that creates privileged debug po
 
 **"No module named 'kubernetes'"**
 ```bash
-pip install "kubernetes>=18.20.0"
+pip install "kubernetes>=30.0.0" "urllib3>=2.0.0"
 ```
 
 **"Failed to connect to Kubernetes cluster"**

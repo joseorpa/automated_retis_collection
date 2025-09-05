@@ -1,3 +1,11 @@
-kubernetes>=18.20.0
-retis 
-urllib3
+# Core Kubernetes API dependencies for KubernetesDebugPodManager
+# Provides client, config, and stream APIs for pod management
+kubernetes>=30.0.0
+
+# HTTP client library for SSL/TLS handling and warnings control
+# Directly imported for urllib3.disable_warnings() functionality
+urllib3>=2.0.0
+
+# Optional: RETIS analysis library for --analyze functionality
+# Can be omitted if only collection features are needed
+retis>=1.6.0
